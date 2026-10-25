@@ -45,7 +45,7 @@ runs:
       id: static-release
       shell: bash
       env:
-        GITHUB_TOKEN: ${{ inputs.remote-token }}
+        GH_TOKEN: ${{ inputs.remote-token }}
         REPOSITORY: ${{ inputs.repository }}
         VERSION_FILE: ${{ inputs.version_file }}
       run: |
@@ -80,7 +80,7 @@ runs:
       if: steps.static-release.outputs.current_tag != steps.static-release.outputs.latest_tag
       shell: bash
       env:
-        GITHUB_TOKEN: ${{ inputs.remote-token }}
+        GH_TOKEN: ${{ inputs.remote-token }}
         REPOSITORY: ${{ inputs.repository }}
         VERSION_FILE: ${{ inputs.version_file }}
         LATEST_TAG: ${{ steps.static-release.outputs.latest_tag }}
@@ -117,7 +117,7 @@ runs:
       if: steps.static-release.outputs.current_tag != steps.static-release.outputs.latest_tag
       shell: bash
       env:
-        GITHUB_TOKEN: ${{ inputs.github-token }}
+        GH_TOKEN: ${{ inputs.github-token }}
         GH_REPO: ${{ github.repository }}
         BASE_BRANCH: ${{ github.ref_name }}
         SERVER_URL: ${{ github.server_url }}
@@ -151,7 +151,7 @@ runs:
         export GIT_CONFIG_KEY_0="credential.${SERVER_URL}.helper"
         export GIT_CONFIG_VALUE_0=""
         export GIT_CONFIG_KEY_1="credential.${SERVER_URL}.helper"
-        export GIT_CONFIG_VALUE_1='!f() { echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; }; f'
+        export GIT_CONFIG_VALUE_1='!f() { echo username=x-access-token; echo "password=${GH_TOKEN}"; }; f'
 
         # If this run pushed the branch but then fails to open the pull request,
         # remove the branch again so the next run starts clean.
@@ -192,7 +192,6 @@ runs:
 
         git -c user.name="${COMMIT_USER_NAME}" \
             -c user.email="${author_email}" \
-            "${sign_args[@]}" \
             commit --quiet -m "${title}"
 
         if [[ -n "${old_sha}" ]]; then
