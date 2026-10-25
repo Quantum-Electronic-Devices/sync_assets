@@ -1,0 +1,213 @@
+name: "Sync statics"
+description: >
+  Copies the assets of the latest release of a source repository over the
+  files with the same name in this repository and opens a pull request.
+  The calling job must check out the repository first and grant
+  `contents: write` and `pull-requests: write`.
+
+inputs:
+  repository:
+    required: true
+    description: "The repository to sync, as <owner>/<repo>."
+
+  version_file:
+    required: true
+    description: "The file name used to define the static content version."
+
+  remote-token:
+    required: true
+    description: "A token with read access to the releases of the source repository."
+
+  github-token:
+    required: true
+    description: "A token that allows pushing a branch and creating a pull request in this repository."
+
+  commit-user-name:
+    required: false
+    default: "github-actions[bot]"
+    description: >
+      Login of the account the commit is attributed to, e.g. the login of a
+      bot account (or `<app-slug>[bot]` for a GitHub App).
+
+  commit-user-id:
+    required: false
+    default: "41898282"
+    description: >
+      Numeric user ID of that account (the default is the ID of github-actions[bot]
+      on github.com). Look it up with: gh api users/<login> --jq .id
+      (for an app: gh api "users/<app-slug>[bot]" --jq .id). It is used to build the
+      commit email <id>+<login>@users.noreply.github.com, which links the commit to the account.
+
+runs:
+  using: "composite"
+  steps:
+    - name: Get latest static release tag
+      id: static-release
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.remote-token }}
+        REPOSITORY: ${{ inputs.repository }}
+        VERSION_FILE: ${{ inputs.version_file }}
+      run: |
+        if [[ ! "${REPOSITORY}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+          echo "::error::'repository' must look like <owner>/<repo>"
+          exit 1
+        fi
+        if [[ ! "${VERSION_FILE}" =~ ^[A-Za-z0-9._][A-Za-z0-9._/-]*$ || "${VERSION_FILE}" == *..* ]]; then
+          echo "::error::'version_file' must be a relative path inside the repository"
+          exit 1
+        fi
+        if [[ ! -f "${VERSION_FILE}" ]]; then
+          echo "::error::Version file '${VERSION_FILE}' does not exist"
+          exit 1
+        fi
+
+        LATEST_TAG="$(gh api "repos/${REPOSITORY}/releases/latest" --jq '.tag_name')"
+        # The tag ends up in a branch name, a commit message and a PR title.
+        if [[ ! "${LATEST_TAG}" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]; then
+          echo "::error::The latest release tag of ${REPOSITORY} is missing or contains unexpected characters"
+          exit 1
+        fi
+        CURRENT_TAG="$(head -c 100 "${VERSION_FILE}" | tr -cd 'A-Za-z0-9._+-')"
+
+        {
+          echo "latest_tag=${LATEST_TAG}"
+          echo "current_tag=${CURRENT_TAG}"
+          echo "current_repo=${REPOSITORY##*/}"
+        } >> "${GITHUB_OUTPUT}"
+
+    - name: Update statics
+      if: steps.static-release.outputs.current_tag != steps.static-release.outputs.latest_tag
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.remote-token }}
+        REPOSITORY: ${{ inputs.repository }}
+        VERSION_FILE: ${{ inputs.version_file }}
+        LATEST_TAG: ${{ steps.static-release.outputs.latest_tag }}
+      run: |
+        # Download outside the workspace so it can never end up in the commit.
+        dir="${RUNNER_TEMP}/statics"
+        rm -rf "${dir}"
+        mkdir -p "${dir}"
+        gh release download "${LATEST_TAG}" --pattern '*.pdf' -D "${dir}" -R "${REPOSITORY}"
+
+        # Replace repository files whose name is exactly the name of a release
+        # asset. Exact string comparison: asset names are chosen by whoever
+        # publishes the release, so they must never be used as a glob or as an
+        # option to cp.
+        declare -A used=()
+        while IFS= read -r -d '' target; do
+          base="${target##*/}"
+          if [[ -f "${dir}/${base}" ]]; then
+            cp -- "${dir}/${base}" "${target}"
+            used["${base}"]=1
+            echo "Updated ${target}"
+          fi
+        done < <(find . -type f -not -path '*/.*' -print0)
+
+        shopt -s nullglob
+        for asset in "${dir}"/*; do
+          name="${asset##*/}"
+          [[ -n "${used[${name}]:-}" ]] || echo "::warning::Release asset '${name}' matches no file in the repository"
+        done
+
+        printf '%s\n' "${LATEST_TAG}" > "${VERSION_FILE}"
+
+    - name: Create pull request
+      if: steps.static-release.outputs.current_tag != steps.static-release.outputs.latest_tag
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        GH_REPO: ${{ github.repository }}
+        BASE_BRANCH: ${{ github.ref_name }}
+        SERVER_URL: ${{ github.server_url }}
+        COMMIT_USER_NAME: ${{ inputs.commit-user-name }}
+        COMMIT_USER_ID: ${{ inputs.commit-user-id }}
+        REPOSITORY: ${{ inputs.repository }}
+        CURRENT_REPO: ${{ steps.static-release.outputs.current_repo }}
+        CURRENT_TAG: ${{ steps.static-release.outputs.current_tag }}
+        LATEST_TAG: ${{ steps.static-release.outputs.latest_tag }}
+      run: |
+        set -u
+        if [[ ! "${COMMIT_USER_NAME}" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\[bot\])?$ ]]; then
+          echo "::error::'commit-user-name' is not a valid GitHub login"
+          exit 1
+        fi
+        if [[ ! "${COMMIT_USER_ID}" =~ ^[0-9]+$ ]]; then
+          echo "::error::'commit-user-id' must be a number"
+          exit 1
+        fi
+        author_email="${COMMIT_USER_ID}+${COMMIT_USER_NAME}@users.noreply.github.com"
+
+        branch="update_statics/${CURRENT_REPO}/${LATEST_TAG}"
+        title="Bump ${REPOSITORY} from ${CURRENT_TAG} to ${LATEST_TAG}"
+        body="Bumps [${REPOSITORY}](https://github.com/${REPOSITORY}) from ${CURRENT_TAG} to ${LATEST_TAG}."
+
+        # The checkout does not persist credentials, so authenticate git with a
+        # credential helper that reads the token from the environment when git
+        # asks for it. The token never appears in a command line, a URL or the log.
+        export GIT_TERMINAL_PROMPT=0
+        export GIT_CONFIG_COUNT=2
+        export GIT_CONFIG_KEY_0="credential.${SERVER_URL}.helper"
+        export GIT_CONFIG_VALUE_0=""
+        export GIT_CONFIG_KEY_1="credential.${SERVER_URL}.helper"
+        export GIT_CONFIG_VALUE_1='!f() { echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; }; f'
+
+        # If this run pushed the branch but then fails to open the pull request,
+        # remove the branch again so the next run starts clean.
+        pushed=0
+        created=0
+        cleanup() {
+          local rc=$?
+          trap - EXIT
+          if [[ ${rc} -ne 0 && ${pushed} -eq 1 && ${created} -eq 0 ]]; then
+            echo "::warning::Removing branch ${branch} because the pull request could not be created"
+            git push --quiet origin --delete "${branch}" || true
+          fi
+          exit "${rc}"
+        }
+        trap cleanup EXIT
+
+        # Idempotent: an open, merged or declined pull request for this exact
+        # version means there is nothing to do (the schedule runs every day).
+        if [[ "$(gh pr list --head "${branch}" --state all --json number --jq length)" != "0" ]]; then
+          echo "A pull request for ${branch} already exists, nothing to do"
+          exit 0
+        fi
+
+        # Reaching this point means no pull request exists for the branch, in any
+        # state. If the branch itself exists it is a leftover of an earlier,
+        # half-finished run and may be based on an old commit, so it is rebuilt
+        # from the current checkout and replaced. ls-remote also fails loudly on
+        # an authentication problem instead of silently looking like "no branch".
+        old_sha="$(git ls-remote --heads origin "refs/heads/${branch}" | cut -f1)"
+
+        git checkout --quiet -B "${branch}"
+        # Only files that already exist are modified, so no untracked file can slip in.
+        git add --update -- .
+        if git diff --cached --quiet; then
+          echo "::warning::The release changed nothing in the repository, no pull request needed"
+          exit 0
+        fi
+
+        git -c user.name="${COMMIT_USER_NAME}" \
+            -c user.email="${author_email}" \
+            "${sign_args[@]}" \
+            commit --quiet -m "${title}"
+
+        if [[ -n "${old_sha}" ]]; then
+          echo "Branch ${branch} exists without a pull request (leftover of an earlier run), replacing it"
+          # --force-with-lease: only overwrite the exact commit seen above, so a
+          # push from somebody else in the meantime is never clobbered.
+          git push --quiet --force-with-lease="refs/heads/${branch}:${old_sha}" origin "HEAD:refs/heads/${branch}"
+        else
+          git push --quiet origin "HEAD:refs/heads/${branch}"
+        fi
+        pushed=1
+
+        pr_url="$(gh pr create --head "${branch}" --base "${BASE_BRANCH}" \
+                    --title "${title}" --body "${body}")"
+        created=1
+        echo "Created ${pr_url}"
+        # A missing label must not undo a successfully created pull request.
+        gh pr edit "${pr_url}" --add-label dependencies || echo "::warning::Could not add the 'dependencies' label"
