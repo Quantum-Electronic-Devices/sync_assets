@@ -141,7 +141,7 @@ runs:
 
     - name: Create pull request
       if: steps.static-release.outputs.current_tag != steps.static-release.outputs.latest_tag
-      uses: Quantum-Electronic-Devices/create-pull-request@80d2b7f96ef69303d2eca53fac6b55ad21675c9d # v1.0.0
+      uses: Quantum-Electronic-Devices/create-pull-request@53004b9edc072770eb55f66e37d81eb8850b96ee # v1.0.1
       with:
         github-token: ${{ inputs.github-token }}
         branch: "update_statics/${{ steps.static-release.outputs.current_repo }}/${{ steps.static-release.outputs.latest_tag }}"
