@@ -38,6 +38,15 @@ inputs:
       (for an app: gh api "users/<app-slug>[bot]" --jq .id). It is used to build the
       commit email <id>+<login>@users.noreply.github.com, which links the commit to the account.
 
+  force-new-pr:
+    required: false
+    default: "false"
+    description: >
+      Set to `true` to replace an existing open pull request for the same release:
+      it is closed with a comment and a new pull request is opened, so the new one
+      is authored by the account `github-token` belongs to. It does not make the
+      action run when the version file is already up to date.
+
 runs:
   using: "composite"
   steps:
@@ -112,6 +121,23 @@ runs:
         done
 
         printf '%s\n' "${LATEST_TAG}" > "${VERSION_FILE}"
+
+    - name: Close existing pull request
+      if: steps.static-release.outputs.current_tag != steps.static-release.outputs.latest_tag && inputs.force-new-pr == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        BRANCH: "update_statics/${{ steps.static-release.outputs.current_repo }}/${{ steps.static-release.outputs.latest_tag }}"
+      run: |
+        while IFS= read -r number; do
+          [[ -n "${number}" ]] || continue
+          gh pr close "${number}" --repo "${REPO}" \
+            --comment "Superseded by a new pull request (forced run ${GITHUB_RUN_ID})."
+          echo "Closed pull request #${number}"
+        done < <(gh api -X GET "repos/${REPO}/pulls" \
+                   -f state=open -f head="${REPO%%/*}:${BRANCH}" \
+                   --jq '.[].number')
 
     - name: Create pull request
       if: steps.static-release.outputs.current_tag != steps.static-release.outputs.latest_tag
